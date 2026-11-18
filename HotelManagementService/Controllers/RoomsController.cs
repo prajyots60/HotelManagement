@@ -1,9 +1,11 @@
 using HotelManagementService.DTOs.Rooms;
 using HotelManagementService.Services.Interfaces;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace HotelManagementService.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/rooms")]
 public class RoomsController : ControllerBase

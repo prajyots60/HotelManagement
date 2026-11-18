@@ -1,9 +1,11 @@
 using HotelManagementService.DTOs.Staff;
 using HotelManagementService.Services.Interfaces;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace HotelManagementService.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/staff")]
 public class StaffController : ControllerBase

@@ -1,9 +1,11 @@
 using HotelManagementService.DTOs.Departments;
 using HotelManagementService.Services.Interfaces;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
 namespace HotelManagementService.Controllers;
 
+[Authorize]
 [ApiController]
 [Route("api/departments")]
 public class DepartmentsController : ControllerBase
