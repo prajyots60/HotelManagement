@@ -1,0 +1,108 @@
+using Microsoft.AspNetCore.Diagnostics;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Data.SqlClient;
+using Microsoft.EntityFrameworkCore;
+using UserService.Exceptions;
+
+namespace UserService.Middleware;
+
+public sealed class GlobalExceptionHandler : IExceptionHandler
+{
+    private readonly ILogger<GlobalExceptionHandler> _logger;
+    private readonly IProblemDetailsService _problemDetailsService;
+
+    public GlobalExceptionHandler(
+        ILogger<GlobalExceptionHandler> logger,
+        IProblemDetailsService problemDetailsService)
+    {
+        _logger = logger;
+        _problemDetailsService = problemDetailsService;
+    }
+
+    public async ValueTask<bool> TryHandleAsync(
+        HttpContext httpContext,
+        Exception exception,
+        CancellationToken cancellationToken)
+    {
+        var isUniqueConstraintViolation = IsUniqueConstraintViolation(exception);
+
+        var (statusCode, title, detail) = exception switch
+        {
+            ConflictException => (
+                StatusCodes.Status409Conflict,
+                "Conflict",
+                exception.Message),
+
+            ForbiddenException => (
+                StatusCodes.Status403Forbidden,
+                "Forbidden",
+                exception.Message),
+
+            _ when isUniqueConstraintViolation => (
+                StatusCodes.Status409Conflict,
+                "Conflict",
+                "A record with the same unique value already exists."),
+
+            _ => (
+                StatusCodes.Status500InternalServerError,
+                "An unexpected error occurred.",
+                "The server encountered an unexpected error. Please try again later.")
+        };
+
+        if (exception is ConflictException or ForbiddenException || isUniqueConstraintViolation)
+        {
+            _logger.LogWarning(
+                "A business rule prevented the operation. Message: {Message}, TraceId: {TraceId}",
+                detail,
+                httpContext.TraceIdentifier);
+        }
+        else
+        {
+            _logger.LogError(
+                exception,
+                "An unhandled exception occurred. TraceId: {TraceId}",
+                httpContext.TraceIdentifier);
+        }
+
+        var problemDetails = new ProblemDetails
+        {
+            Status = statusCode,
+            Title = title,
+            Detail = detail,
+            Instance = httpContext.Request.Path
+        };
+
+        problemDetails.Extensions["traceId"] =
+            httpContext.TraceIdentifier;
+
+        httpContext.Response.StatusCode = statusCode;
+
+        return await _problemDetailsService.TryWriteAsync(
+            new ProblemDetailsContext
+            {
+                HttpContext = httpContext,
+                ProblemDetails = problemDetails
+            });
+    }
+
+    private static bool IsUniqueConstraintViolation(Exception exception)
+    {
+        if (exception is not DbUpdateException)
+        {
+            return false;
+        }
+
+        var current = exception.InnerException;
+        while (current is not null)
+        {
+            if (current is SqlException sqlEx && (sqlEx.Number == 2601 || sqlEx.Number == 2627))
+            {
+                return true;
+            }
+
+            current = current.InnerException;
+        }
+
+        return false;
+    }
+}

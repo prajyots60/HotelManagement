@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Identity;
+using Microsoft.Extensions.Logging;
 using UserService.DTOs.Users;
+using UserService.Exceptions;
 using UserService.Models;
 using UserService.Repositories.Interfaces;
 using UserService.Services.Interfaces;
@@ -11,15 +13,21 @@ public class UserService : IUserService
     private readonly IUserRepository _userRepository;
     private readonly IPasswordHasher<User> _passwordHasher;
     private readonly ITokenService _tokenService;
+    private readonly ILogger<UserService> _logger;
+    private readonly ICurrentUserService _currentUserService;
 
     public UserService(
         IUserRepository userRepository,
         IPasswordHasher<User> passwordHasher,
-        ITokenService tokenService)
+        ITokenService tokenService,
+        ILogger<UserService> logger,
+        ICurrentUserService currentUserService)
     {
         _userRepository = userRepository;
         _passwordHasher = passwordHasher;
         _tokenService = tokenService;
+        _logger = logger;
+        _currentUserService = currentUserService;
     }
 
     public async Task<IEnumerable<UserResponseDto>> GetAllUsersAsync()
@@ -40,9 +48,11 @@ public class UserService : IUserService
     {
         var username = dto.Username.Trim();
 
+        ValidateRoleAssignment(dto.Role);
+
         if (await _userRepository.UsernameExistsAsync(username))
         {
-            throw new InvalidOperationException("Username already exists.");
+            throw new ConflictException("Username already exists.");
         }
 
         var user = new User
@@ -55,6 +65,11 @@ public class UserService : IUserService
         user.PasswordHash = _passwordHasher.HashPassword(user, dto.Password);
 
         var createdUser = await _userRepository.AddAsync(user);
+
+        _logger.LogInformation(
+            "User created successfully. UserId: {UserId}, Role: {Role}",
+            createdUser.UserId,
+            createdUser.Role);
 
         return MapToResponse(createdUser);
     }
@@ -70,18 +85,24 @@ public class UserService : IUserService
             return null;
         }
 
+        ValidateRoleAssignment(dto.Role);
+
         var username = dto.Username.Trim();
 
         if (!string.Equals(user.Username, username, StringComparison.OrdinalIgnoreCase)
             && await _userRepository.UsernameExistsAsync(username))
         {
-            throw new InvalidOperationException("Username already exists.");
+            throw new ConflictException("Username already exists.");
         }
 
         user.Username = username;
         user.Role = dto.Role;
 
         await _userRepository.UpdateAsync(user);
+
+        _logger.LogInformation(
+            "User updated successfully. UserId: {UserId}",
+            user.UserId);
 
         return MapToResponse(user);
     }
@@ -97,6 +118,10 @@ public class UserService : IUserService
 
         await _userRepository.DeleteAsync(user);
 
+        _logger.LogInformation(
+            "User deleted successfully. UserId: {UserId}",
+            user.UserId);
+
         return true;
     }
 
@@ -107,6 +132,7 @@ public class UserService : IUserService
 
         if (user is null)
         {
+            _logger.LogWarning("Authentication failed due to invalid credentials.");
             return null;
         }
 
@@ -117,10 +143,15 @@ public class UserService : IUserService
 
         if (result == PasswordVerificationResult.Failed)
         {
+            _logger.LogWarning("Authentication failed due to invalid credentials.");
             return null;
         }
 
         var tokenResult = _tokenService.GenerateToken(user);
+
+        _logger.LogInformation(
+            "User authenticated successfully. UserId: {UserId}",
+            user.UserId);
 
         return new LoginResponseDto
         {
@@ -128,6 +159,24 @@ public class UserService : IUserService
             ExpiresAtUtc = tokenResult.ExpiresAtUtc,
             User = MapToResponse(user)
         };
+    }
+
+    private void ValidateRoleAssignment(string requestedRole)
+    {
+        var currentRole = _currentUserService.Role;
+
+        if (currentRole == "Owner")
+        {
+            return;
+        }
+
+        if (currentRole == "Manager" && requestedRole != "Owner")
+        {
+            return;
+        }
+
+        throw new ForbiddenException(
+            "You are not permitted to assign the requested role.");
     }
 
     private static UserResponseDto MapToResponse(User user)

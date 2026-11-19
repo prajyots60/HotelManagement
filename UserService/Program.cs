@@ -1,18 +1,24 @@
 using System.Security.Claims;
 using System.Text;
+using FluentValidation;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
+using Serilog;
+using UserService.Authorization;
 using UserService.Configuration;
 using UserService.Data;
+using UserService.Infrastructure.Security;
 using UserService.Infrastructure.Swagger;
+using UserService.Middleware;
 using UserService.Models;
 using UserService.Repositories.Interfaces;
 using UserService.Repositories.Implementations;
 using UserService.Services.Interfaces;
 using UserService.Services.Implementations;
+using UserService.Validators;
 
 // Prevent inotify limit exceptions on Linux environments
 Environment.SetEnvironmentVariable("DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE", "false");
@@ -20,9 +26,21 @@ Environment.SetEnvironmentVariable("DOTNET_USE_POLLING_FILE_WATCHER", "true");
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Host.UseSerilog((context, services, loggerConfiguration) =>
+{
+    loggerConfiguration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext()
+        .WriteTo.Console();
+});
+
 // Add services to the container.
 
 builder.Services.AddControllers();
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+builder.Services.AddValidatorsFromAssemblyContaining<CreateUserDtoValidator>();
 
 builder.Services.AddSwaggerGen(options =>
 {
@@ -106,7 +124,26 @@ builder.Services
         };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(AuthorizationPolicies.UsersRead, policy =>
+    {
+        policy.RequireAuthenticatedUser();
+    });
+
+    options.AddPolicy(AuthorizationPolicies.UsersManage, policy =>
+    {
+        policy.RequireRole("Owner", "Manager");
+    });
+
+    options.AddPolicy(AuthorizationPolicies.UsersDelete, policy =>
+    {
+        policy.RequireRole("Owner");
+    });
+});
+
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddScoped<ICurrentUserService, CurrentUserService>();
 
 builder.Services.AddScoped<IUserRepository, UserRepository>();
 builder.Services.AddScoped<IUserService, UserService.Services.Implementations.UserService>();
@@ -114,6 +151,10 @@ builder.Services.AddScoped<IPasswordHasher<User>, PasswordHasher<User>>();
 builder.Services.AddScoped<ITokenService, TokenService>();
 
 var app = builder.Build();
+
+app.UseSerilogRequestLogging();
+
+app.UseExceptionHandler();
 
 // Configure the HTTP request pipeline.
 if (app.Environment.IsDevelopment())
