@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Text;
+using HotelManagementService.Authorization;
 using HotelManagementService.Configuration;
 using HotelManagementService.Data;
 using HotelManagementService.Repositories.Interfaces;
@@ -10,6 +11,10 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
 using Microsoft.OpenApi;
+using Serilog;
+using HotelManagementService.Middleware;
+using FluentValidation;
+using HotelManagementService.Validators.Departments;
 
 // Prevent inotify limit exceptions on Linux environments
 Environment.SetEnvironmentVariable("DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE", "false");
@@ -17,7 +22,17 @@ Environment.SetEnvironmentVariable("DOTNET_USE_POLLING_FILE_WATCHER", "true");
 
 var builder = WebApplication.CreateBuilder(args);
 
+builder.Host.UseSerilog((context, services, loggerConfiguration) =>
+    loggerConfiguration
+        .ReadFrom.Configuration(context.Configuration)
+        .ReadFrom.Services(services)
+        .Enrich.FromLogContext()
+        .WriteTo.Console());
+
 builder.Services.AddControllers();
+builder.Services.AddProblemDetails();
+builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
+builder.Services.AddValidatorsFromAssemblyContaining<CreateDepartmentDtoValidator>();
 
 builder.Services.AddDbContext<HotelDbContext>(options =>
     options.UseSqlServer(
@@ -114,9 +129,31 @@ builder.Services
         };
     });
 
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy(HotelPolicies.HotelRead, policy =>
+        policy.RequireRole("Owner", "Manager", "Receptionist"));
+
+    options.AddPolicy(HotelPolicies.DepartmentsManage, policy =>
+        policy.RequireRole("Owner", "Manager"));
+
+    options.AddPolicy(HotelPolicies.StaffManage, policy =>
+        policy.RequireRole("Owner", "Manager"));
+
+    options.AddPolicy(HotelPolicies.RoomsManage, policy =>
+        policy.RequireRole("Owner", "Manager"));
+
+    options.AddPolicy(HotelPolicies.RoomRatesManage, policy =>
+        policy.RequireRole("Owner", "Manager"));
+
+    options.AddPolicy(HotelPolicies.InventoryManage, policy =>
+        policy.RequireRole("Owner", "Manager", "Receptionist"));
+});
 
 var app = builder.Build();
+
+app.UseSerilogRequestLogging();
+app.UseExceptionHandler();
 
 if (app.Environment.IsDevelopment())
 {

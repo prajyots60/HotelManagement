@@ -1,7 +1,9 @@
 using HotelManagementService.DTOs.Rooms;
+using HotelManagementService.Exceptions;
 using HotelManagementService.Models;
 using HotelManagementService.Repositories.Interfaces;
 using HotelManagementService.Services.Interfaces;
+using Microsoft.Extensions.Logging;
 
 namespace HotelManagementService.Services.Implementations;
 
@@ -15,10 +17,14 @@ public class RoomService : IRoomService
     ];
 
     private readonly IRoomRepository _repository;
+    private readonly ILogger<RoomService> _logger;
 
-    public RoomService(IRoomRepository repository)
+    public RoomService(
+        IRoomRepository repository,
+        ILogger<RoomService> logger)
     {
         _repository = repository;
+        _logger = logger;
     }
 
     public async Task<List<RoomResponseDto>> GetAllAsync()
@@ -33,16 +39,18 @@ public class RoomService : IRoomService
         return room is null ? null : MapToResponse(room);
     }
 
-    public async Task<(RoomResponseDto? Data, string? Error)> CreateAsync(CreateRoomDto dto)
+    public async Task<RoomResponseDto> CreateAsync(CreateRoomDto dto)
     {
         var roomNumber = dto.RoomNumber.Trim();
-        var status = NormalizeStatus(dto.Status);
-
-        if (status is null)
-            return (null, "Invalid room status. Allowed values: Available, Occupied, Maintenance.");
+        var status = NormalizeStatus(dto.Status) ?? "Available";
 
         if (await _repository.GetByRoomNumberAsync(roomNumber) is not null)
-            return (null, "Room number already exists.");
+        {
+            _logger.LogWarning(
+                "Failed to create room. RoomNumber {RoomNumber} already exists",
+                roomNumber);
+            throw new ConflictException("Room number already exists.");
+        }
 
         var room = new Room
         {
@@ -53,26 +61,41 @@ public class RoomService : IRoomService
         };
 
         var created = await _repository.CreateAsync(room);
-        return (MapToResponse(created), null);
+
+        _logger.LogInformation(
+            "Room created successfully with RoomId {RoomId}, RoomNumber {RoomNumber}, and RoomType {RoomType}",
+            created.RoomId,
+            created.RoomNumber,
+            created.RoomType);
+
+        return MapToResponse(created);
     }
 
-    public async Task<(RoomResponseDto? Data, string? Error)> UpdateAsync(int id, UpdateRoomDto dto)
+    public async Task<RoomResponseDto?> UpdateAsync(int id, UpdateRoomDto dto)
     {
         var existing = await _repository.GetByIdAsync(id);
 
         if (existing is null)
-            return (null, null);
+        {
+            _logger.LogWarning(
+                "Failed to update room. Room with RoomId {RoomId} was not found",
+                id);
+            return null;
+        }
 
         var roomNumber = dto.RoomNumber.Trim();
-        var status = NormalizeStatus(dto.Status);
-
-        if (status is null)
-            return (null, "Invalid room status. Allowed values: Available, Occupied, Maintenance.");
+        var status = NormalizeStatus(dto.Status) ?? "Available";
 
         var duplicate = await _repository.GetByRoomNumberAsync(roomNumber);
 
         if (duplicate is not null && duplicate.RoomId != id)
-            return (null, "Room number already exists.");
+        {
+            _logger.LogWarning(
+                "Failed to update room {RoomId}. RoomNumber {RoomNumber} already belongs to another room",
+                id,
+                roomNumber);
+            throw new ConflictException("Room number already exists.");
+        }
 
         var room = new Room
         {
@@ -84,12 +107,40 @@ public class RoomService : IRoomService
 
         var updated = await _repository.UpdateAsync(id, room);
 
-        return (updated is null ? null : MapToResponse(updated), null);
+        if (updated is null)
+        {
+            _logger.LogWarning(
+                "Failed to update room. Room with RoomId {RoomId} was not found during persist",
+                id);
+            return null;
+        }
+
+        _logger.LogInformation(
+            "Room {RoomId} updated successfully with RoomNumber {RoomNumber} and RoomType {RoomType}",
+            updated.RoomId,
+            updated.RoomNumber,
+            updated.RoomType);
+
+        return MapToResponse(updated);
     }
 
-    public Task<bool> DeleteAsync(int id)
+    public async Task<bool> DeleteAsync(int id)
     {
-        return _repository.DeleteAsync(id);
+        var deleted = await _repository.DeleteAsync(id);
+
+        if (!deleted)
+        {
+            _logger.LogWarning(
+                "Failed to delete room. Room with RoomId {RoomId} was not found",
+                id);
+            return false;
+        }
+
+        _logger.LogInformation(
+            "Room {RoomId} deleted successfully",
+            id);
+
+        return true;
     }
 
     private static string? NormalizeStatus(string status)

@@ -1,3 +1,5 @@
+using FluentValidation;
+using HotelManagementService.Authorization;
 using HotelManagementService.DTOs.Staff;
 using HotelManagementService.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
@@ -5,16 +7,23 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace HotelManagementService.Controllers;
 
-[Authorize]
+[Authorize(Policy = HotelPolicies.HotelRead)]
 [ApiController]
 [Route("api/staff")]
 public class StaffController : ControllerBase
 {
     private readonly IStaffService _service;
+    private readonly IValidator<CreateStaffDto> _createValidator;
+    private readonly IValidator<UpdateStaffDto> _updateValidator;
 
-    public StaffController(IStaffService service)
+    public StaffController(
+        IStaffService service,
+        IValidator<CreateStaffDto> createValidator,
+        IValidator<UpdateStaffDto> updateValidator)
     {
         _service = service;
+        _createValidator = createValidator;
+        _updateValidator = updateValidator;
     }
 
     [HttpGet]
@@ -34,28 +43,44 @@ public class StaffController : ControllerBase
         return Ok(staff);
     }
 
+    [Authorize(Policy = HotelPolicies.StaffManage)]
     [HttpPost]
     public async Task<IActionResult> Create(CreateStaffDto dto)
     {
-        var (data, error) = await _service.CreateAsync(dto);
+        var validationResult = await _createValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
+        {
+            foreach (var failure in validationResult.Errors)
+            {
+                ModelState.AddModelError(failure.PropertyName, failure.ErrorMessage);
+            }
+            return ValidationProblem(ModelState);
+        }
 
-        if (error is not null)
-            return BadRequest(new { message = error });
+        var data = await _service.CreateAsync(dto);
 
         return CreatedAtAction(
             nameof(GetById),
-            new { id = data!.StaffId },
+            new { id = data.StaffId },
             data);
     }
 
+    [Authorize(Policy = HotelPolicies.StaffManage)]
     [HttpPut("{id:int}")]
     public async Task<IActionResult> Update(
         int id, UpdateStaffDto dto)
     {
-        var (data, error) = await _service.UpdateAsync(id, dto);
+        var validationResult = await _updateValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
+        {
+            foreach (var failure in validationResult.Errors)
+            {
+                ModelState.AddModelError(failure.PropertyName, failure.ErrorMessage);
+            }
+            return ValidationProblem(ModelState);
+        }
 
-        if (error is not null)
-            return BadRequest(new { message = error });
+        var data = await _service.UpdateAsync(id, dto);
 
         if (data is null)
             return NotFound(new { message = "Staff member not found." });
@@ -63,6 +88,7 @@ public class StaffController : ControllerBase
         return Ok(data);
     }
 
+    [Authorize(Policy = HotelPolicies.StaffManage)]
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id)
     {

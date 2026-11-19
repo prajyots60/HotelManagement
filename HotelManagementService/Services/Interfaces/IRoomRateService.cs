@@ -6,7 +6,7 @@ public interface IRoomRateService
 {
     Task<List<RoomRateResponseDto>> GetAllAsync();
     Task<RoomRateResponseDto?> GetByIdAsync(int id);
-    Task<(RoomRateResponseDto? Data, string? Error)> CreateAsync(CreateRoomRateDto dto);
-    Task<(RoomRateResponseDto? Data, string? Error)> UpdateAsync(int id, UpdateRoomRateDto dto);
+    Task<RoomRateResponseDto> CreateAsync(CreateRoomRateDto dto);
+    Task<RoomRateResponseDto?> UpdateAsync(int id, UpdateRoomRateDto dto);
     Task<bool> DeleteAsync(int id);
 }

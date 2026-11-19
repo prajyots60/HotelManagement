@@ -6,7 +6,7 @@ public interface IRoomService
 {
     Task<List<RoomResponseDto>> GetAllAsync();
     Task<RoomResponseDto?> GetByIdAsync(int id);
-    Task<(RoomResponseDto? Data, string? Error)> CreateAsync(CreateRoomDto dto);
-    Task<(RoomResponseDto? Data, string? Error)> UpdateAsync(int id, UpdateRoomDto dto);
+    Task<RoomResponseDto> CreateAsync(CreateRoomDto dto);
+    Task<RoomResponseDto?> UpdateAsync(int id, UpdateRoomDto dto);
     Task<bool> DeleteAsync(int id);
 }

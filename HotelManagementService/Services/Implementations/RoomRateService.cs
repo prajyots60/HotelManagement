@@ -1,17 +1,23 @@
 using HotelManagementService.DTOs.RoomRates;
+using HotelManagementService.Exceptions;
 using HotelManagementService.Models;
 using HotelManagementService.Repositories.Interfaces;
 using HotelManagementService.Services.Interfaces;
+using Microsoft.Extensions.Logging;
 
 namespace HotelManagementService.Services.Implementations;
 
 public class RoomRateService : IRoomRateService
 {
     private readonly IRoomRateRepository _repository;
+    private readonly ILogger<RoomRateService> _logger;
 
-    public RoomRateService(IRoomRateRepository repository)
+    public RoomRateService(
+        IRoomRateRepository repository,
+        ILogger<RoomRateService> logger)
     {
         _repository = repository;
+        _logger = logger;
     }
 
     public async Task<List<RoomRateResponseDto>> GetAllAsync()
@@ -26,15 +32,15 @@ public class RoomRateService : IRoomRateService
         return rate is null ? null : MapToResponse(rate);
     }
 
-    public async Task<(RoomRateResponseDto? Data, string? Error)> CreateAsync(
-        CreateRoomRateDto dto)
+    public async Task<RoomRateResponseDto> CreateAsync(CreateRoomRateDto dto)
     {
-        var error = await ValidateAsync(
-            dto.RoomId, dto.StartDate, dto.EndDate,
-            dto.GuestCount, dto.FirstNightPrice, dto.ExtensionPrice);
-
-        if (error is not null)
-            return (null, error);
+        if (!await _repository.RoomExistsAsync(dto.RoomId))
+        {
+            _logger.LogWarning(
+                "Failed to create room rate. Room with RoomId {RoomId} does not exist",
+                dto.RoomId);
+            throw new NotFoundException("The specified room does not exist.");
+        }
 
         var rate = new RoomRate
         {
@@ -48,23 +54,37 @@ public class RoomRateService : IRoomRateService
         };
 
         var created = await _repository.CreateAsync(rate);
-        return (MapToResponse(created), null);
+
+        _logger.LogInformation(
+            "Room rate created successfully with RateId {RateId} for RoomId {RoomId} (Day: {Day}, GuestCount: {GuestCount})",
+            created.RateId,
+            created.RoomId,
+            created.Day,
+            created.GuestCount);
+
+        return MapToResponse(created);
     }
 
-    public async Task<(RoomRateResponseDto? Data, string? Error)> UpdateAsync(
-        int id, UpdateRoomRateDto dto)
+    public async Task<RoomRateResponseDto?> UpdateAsync(int id, UpdateRoomRateDto dto)
     {
         var existing = await _repository.GetByIdAsync(id);
 
         if (existing is null)
-            return (null, null);
+        {
+            _logger.LogWarning(
+                "Failed to update room rate. Room rate with RateId {RateId} was not found",
+                id);
+            return null;
+        }
 
-        var error = await ValidateAsync(
-            dto.RoomId, dto.StartDate, dto.EndDate,
-            dto.GuestCount, dto.FirstNightPrice, dto.ExtensionPrice);
-
-        if (error is not null)
-            return (null, error);
+        if (!await _repository.RoomExistsAsync(dto.RoomId))
+        {
+            _logger.LogWarning(
+                "Failed to update room rate {RateId}. Room with RoomId {RoomId} does not exist",
+                id,
+                dto.RoomId);
+            throw new NotFoundException("The specified room does not exist.");
+        }
 
         var rate = new RoomRate
         {
@@ -79,35 +99,41 @@ public class RoomRateService : IRoomRateService
 
         var updated = await _repository.UpdateAsync(id, rate);
 
-        return (updated is null ? null : MapToResponse(updated), null);
+        if (updated is null)
+        {
+            _logger.LogWarning(
+                "Failed to update room rate. Room rate with RateId {RateId} was not found during persist",
+                id);
+            return null;
+        }
+
+        _logger.LogInformation(
+            "Room rate {RateId} updated successfully for RoomId {RoomId} (Day: {Day}, GuestCount: {GuestCount})",
+            updated.RateId,
+            updated.RoomId,
+            updated.Day,
+            updated.GuestCount);
+
+        return MapToResponse(updated);
     }
 
-    public Task<bool> DeleteAsync(int id)
+    public async Task<bool> DeleteAsync(int id)
     {
-        return _repository.DeleteAsync(id);
-    }
+        var deleted = await _repository.DeleteAsync(id);
 
-    private async Task<string?> ValidateAsync(
-        int roomId,
-        DateOnly startDate,
-        DateOnly endDate,
-        int guestCount,
-        decimal firstNightPrice,
-        decimal extensionPrice)
-    {
-        if (!await _repository.RoomExistsAsync(roomId))
-            return "The specified room does not exist.";
+        if (!deleted)
+        {
+            _logger.LogWarning(
+                "Failed to delete room rate. Room rate with RateId {RateId} was not found",
+                id);
+            return false;
+        }
 
-        if (startDate > endDate)
-            return "Start date cannot be after end date.";
+        _logger.LogInformation(
+            "Room rate {RateId} deleted successfully",
+            id);
 
-        if (guestCount <= 0)
-            return "Guest count must be greater than zero.";
-
-        if (firstNightPrice <= 0 || extensionPrice <= 0)
-            return "Prices must be greater than zero.";
-
-        return null;
+        return true;
     }
 
     private static RoomRateResponseDto MapToResponse(RoomRate rate)

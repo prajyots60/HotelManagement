@@ -1,3 +1,5 @@
+using FluentValidation;
+using HotelManagementService.Authorization;
 using HotelManagementService.DTOs.Inventory;
 using HotelManagementService.Services.Interfaces;
 using Microsoft.AspNetCore.Authorization;
@@ -5,16 +7,23 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace HotelManagementService.Controllers;
 
-[Authorize]
+[Authorize(Policy = HotelPolicies.HotelRead)]
 [ApiController]
 [Route("api/inventory")]
 public class InventoryController : ControllerBase
 {
     private readonly IInventoryService _service;
+    private readonly IValidator<CreateInventoryDto> _createValidator;
+    private readonly IValidator<UpdateInventoryDto> _updateValidator;
 
-    public InventoryController(IInventoryService service)
+    public InventoryController(
+        IInventoryService service,
+        IValidator<CreateInventoryDto> createValidator,
+        IValidator<UpdateInventoryDto> updateValidator)
     {
         _service = service;
+        _createValidator = createValidator;
+        _updateValidator = updateValidator;
     }
 
     [HttpGet]
@@ -34,9 +43,20 @@ public class InventoryController : ControllerBase
         return Ok(item);
     }
 
+    [Authorize(Policy = HotelPolicies.InventoryManage)]
     [HttpPost]
     public async Task<IActionResult> Create(CreateInventoryDto dto)
     {
+        var validationResult = await _createValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
+        {
+            foreach (var error in validationResult.Errors)
+            {
+                ModelState.AddModelError(error.PropertyName, error.ErrorMessage);
+            }
+            return ValidationProblem(ModelState);
+        }
+
         var item = await _service.CreateAsync(dto);
 
         return CreatedAtAction(
@@ -45,9 +65,20 @@ public class InventoryController : ControllerBase
             item);
     }
 
+    [Authorize(Policy = HotelPolicies.InventoryManage)]
     [HttpPut("{id:int}")]
     public async Task<IActionResult> Update(int id, UpdateInventoryDto dto)
     {
+        var validationResult = await _updateValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
+        {
+            foreach (var error in validationResult.Errors)
+            {
+                ModelState.AddModelError(error.PropertyName, error.ErrorMessage);
+            }
+            return ValidationProblem(ModelState);
+        }
+
         var item = await _service.UpdateAsync(id, dto);
 
         if (item is null)
@@ -56,6 +87,7 @@ public class InventoryController : ControllerBase
         return Ok(item);
     }
 
+    [Authorize(Policy = HotelPolicies.InventoryManage)]
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id)
     {

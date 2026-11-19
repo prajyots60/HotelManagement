@@ -8,7 +8,7 @@ using UserService.Services.Interfaces;
 namespace UserService.Controllers;
 
 [ApiController]
-[Route("api/[controller]")]
+[Route("api/users")]
 [Authorize(Policy = AuthorizationPolicies.UsersRead)]
 public class UsersController : ControllerBase
 {
