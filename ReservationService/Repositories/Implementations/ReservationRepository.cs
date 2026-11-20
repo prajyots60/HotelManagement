@@ -1,5 +1,9 @@
+using System.Data;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using ReservationService.Data;
+using ReservationService.Exceptions;
 using ReservationService.Models;
 using ReservationService.Repositories.Interfaces;
 
@@ -7,7 +11,7 @@ namespace ReservationService.Repositories.Implementations;
 
 /// <summary>
 /// EF Core implementation of IReservationRepository interacting with [ReservationDB].[dbo].[Reservations].
-/// Handles interval overlap mathematics and batch availability lookups.
+/// Handles interval overlap mathematics, batch availability lookups, and transaction-owned application locking.
 /// </summary>
 public class ReservationRepository : IReservationRepository
 {
@@ -16,6 +20,101 @@ public class ReservationRepository : IReservationRepository
     public ReservationRepository(ReservationDbContext context)
     {
         _context = context;
+    }
+
+    /// <summary>
+    /// Begins an explicit EF Core database transaction.
+    /// </summary>
+    public async Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default)
+    {
+        return await _context.Database.BeginTransactionAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Acquires an exclusive, transaction-owned SQL Server application lock for the given room ID.
+    /// Executes sys.sp_getapplock on the active transaction using DbCommand.
+    /// Return codes:
+    ///   0: The lock was granted synchronously.
+    ///   1: The lock was granted after waiting for other locks to be released.
+    ///  -1: The lock request timed out.
+    ///  -2: The lock request was canceled.
+    ///  -3: The lock request was chosen as a deadlock victim.
+    /// -999: Indicates a parameter validation or other call error.
+    /// </summary>
+    public async Task AcquireRoomLockAsync(int roomId, CancellationToken cancellationToken = default)
+    {
+        var currentTransaction = _context.Database.CurrentTransaction;
+        if (currentTransaction is null)
+        {
+            throw new InvalidOperationException("AcquireRoomLockAsync must be called within an active database transaction.");
+        }
+
+        var connection = _context.Database.GetDbConnection();
+        if (connection.State != ConnectionState.Open)
+        {
+            await connection.OpenAsync(cancellationToken);
+        }
+
+        using var command = connection.CreateCommand();
+        command.Transaction = currentTransaction.GetDbTransaction();
+        command.CommandText = "sys.sp_getapplock";
+        command.CommandType = CommandType.StoredProcedure;
+        command.CommandTimeout = 10; // seconds
+
+        var resourceParam = command.CreateParameter();
+        resourceParam.ParameterName = "@Resource";
+        resourceParam.Value = $"Reservation_Room_{roomId}";
+        resourceParam.DbType = DbType.String;
+        resourceParam.Size = 255;
+        command.Parameters.Add(resourceParam);
+
+        var lockModeParam = command.CreateParameter();
+        lockModeParam.ParameterName = "@LockMode";
+        lockModeParam.Value = "Exclusive";
+        lockModeParam.DbType = DbType.String;
+        lockModeParam.Size = 32;
+        command.Parameters.Add(lockModeParam);
+
+        var lockOwnerParam = command.CreateParameter();
+        lockOwnerParam.ParameterName = "@LockOwner";
+        lockOwnerParam.Value = "Transaction";
+        lockOwnerParam.DbType = DbType.String;
+        lockOwnerParam.Size = 32;
+        command.Parameters.Add(lockOwnerParam);
+
+        var lockTimeoutParam = command.CreateParameter();
+        lockTimeoutParam.ParameterName = "@LockTimeout";
+        lockTimeoutParam.Value = 5000; // 5000 ms timeout
+        lockTimeoutParam.DbType = DbType.Int32;
+        command.Parameters.Add(lockTimeoutParam);
+
+        var returnParam = command.CreateParameter();
+        returnParam.ParameterName = "@Result";
+        returnParam.Direction = ParameterDirection.ReturnValue;
+        returnParam.DbType = DbType.Int32;
+        command.Parameters.Add(returnParam);
+
+        await command.ExecuteNonQueryAsync(cancellationToken);
+
+        var result = returnParam.Value is int intVal ? intVal : Convert.ToInt32(returnParam.Value);
+
+        if (result == 0 || result == 1)
+        {
+            // Lock successfully acquired (immediately or after wait)
+            return;
+        }
+
+        if (result == -1) // Timeout
+        {
+            throw new ConflictException("The selected room is currently being booked by another request. Please retry.");
+        }
+
+        if (result == -3) // Deadlock victim
+        {
+            throw new ConflictException("A concurrency conflict occurred while reserving the room. Please retry.");
+        }
+
+        throw new InvalidOperationException($"Failed to acquire application lock for room {roomId}. sp_getapplock returned status code {result}.");
     }
 
     /// <summary>

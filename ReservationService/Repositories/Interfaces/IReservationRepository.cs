@@ -1,9 +1,21 @@
+using Microsoft.EntityFrameworkCore.Storage;
 using ReservationService.Models;
 
 namespace ReservationService.Repositories.Interfaces;
 
 public interface IReservationRepository
 {
+    /// <summary>
+    /// Begins an explicit EF Core database transaction on the underlying connection.
+    /// </summary>
+    Task<IDbContextTransaction> BeginTransactionAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Acquires an exclusive, transaction-owned SQL Server application lock for the given room ID.
+    /// Executes sys.sp_getapplock on the active transaction.
+    /// </summary>
+    Task AcquireRoomLockAsync(int roomId, CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Retrieves all reservations ordered chronologically by CheckIn date.
     /// Eager-loads the associated Guest entity for reporting/UI display.

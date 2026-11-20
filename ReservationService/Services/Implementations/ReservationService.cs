@@ -30,6 +30,14 @@ public class ReservationService : IReservationService
         "CheckedOut"
     ];
 
+    // Set of statuses that occupy/block room availability
+    private static readonly HashSet<string> BlockingStatuses =
+    [
+        "Pending",
+        "Confirmed",
+        "CheckedIn"
+    ];
+
     public ReservationService(
         IReservationRepository reservationRepository,
         IGuestRepository guestRepository,
@@ -70,10 +78,12 @@ public class ReservationService : IReservationService
     /// Coordinates the full reservation creation workflow:
     /// 1. Validates stay dates (CheckOut > CheckIn)
     /// 2. Validates guest existence in ReservationDB
-    /// 3. Validates room existence & capacity via HTTP call to HotelManagementService
-    /// 4. Checks ReservationDB for schedule overlaps on that room
-    /// 5. Computes nights, generates booking code, sets status = 'Confirmed'
-    /// 6. Persists to ReservationDB
+    /// 3. Validates room existence & capacity via HTTP call to HotelManagementService (OUTSIDE transaction)
+    /// 4. Begins explicit database transaction
+    /// 5. Acquires exclusive transaction-owned SQL application lock on dto.RoomId
+    /// 6. Checks ReservationDB for schedule overlaps on that room
+    /// 7. Computes nights, generates booking code, sets status = 'Confirmed'
+    /// 8. Persists to ReservationDB and commits transaction (releasing lock)
     /// </summary>
     public async Task<ReservationResponseDto> CreateAsync(
         CreateReservationDto dto)
@@ -82,6 +92,7 @@ public class ReservationService : IReservationService
 
         await ValidateGuestAsync(dto.GuestId);
 
+        // Downstream HTTP query strictly OUTSIDE database transaction
         var room = await GetRoomAsync(dto.RoomId);
 
         if (room is null)
@@ -89,36 +100,52 @@ public class ReservationService : IReservationService
 
         ValidateRoom(room, dto.Adults, dto.Children);
 
-        var hasOverlap = await _reservationRepository
-            .HasOverlappingReservationAsync(
-                dto.RoomId,
-                dto.CheckIn,
-                dto.CheckOut);
-
-        if (hasOverlap)
-            throw new ConflictException(
-                "The selected room is not available for the requested dates.");
-
-        var reservation = new Reservation
+        await using var transaction = await _reservationRepository.BeginTransactionAsync();
+        try
         {
-            ReservationCode = GenerateReservationCode(),
-            GuestId = dto.GuestId,
-            RoomId = dto.RoomId,
-            Adults = dto.Adults,
-            Children = dto.Children,
-            CheckIn = dto.CheckIn,
-            CheckOut = dto.CheckOut,
-            Nights = dto.CheckOut.DayNumber - dto.CheckIn.DayNumber,
-            Status = "Confirmed"
-        };
+            // Acquire exclusive, transaction-owned application lock for requested room
+            await _reservationRepository.AcquireRoomLockAsync(dto.RoomId);
 
-        var created = await _reservationRepository.CreateAsync(reservation);
+            var hasOverlap = await _reservationRepository
+                .HasOverlappingReservationAsync(
+                    dto.RoomId,
+                    dto.CheckIn,
+                    dto.CheckOut);
 
-        return MapToResponse(created, "Reservation created successfully.");
+            if (hasOverlap)
+            {
+                throw new ConflictException(
+                    "The selected room is not available for the requested dates.");
+            }
+
+            var reservation = new Reservation
+            {
+                ReservationCode = GenerateReservationCode(),
+                GuestId = dto.GuestId,
+                RoomId = dto.RoomId,
+                Adults = dto.Adults,
+                Children = dto.Children,
+                CheckIn = dto.CheckIn,
+                CheckOut = dto.CheckOut,
+                Nights = dto.CheckOut.DayNumber - dto.CheckIn.DayNumber,
+                Status = "Confirmed"
+            };
+
+            var created = await _reservationRepository.CreateAsync(reservation);
+            await transaction.CommitAsync();
+
+            return MapToResponse(created, "Reservation created successfully.");
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
     }
 
     /// <summary>
-    /// Updates an existing reservation with date overlap check excluding itself.
+    /// Updates an existing reservation with concurrency protection and date overlap check excluding itself.
+    /// Locks rooms in ascending order when changing room allocation.
     /// </summary>
     public async Task<ReservationResponseDto?> UpdateAsync(
         int id,
@@ -133,6 +160,7 @@ public class ReservationService : IReservationService
 
         await ValidateGuestAsync(dto.GuestId);
 
+        // Downstream HTTP query strictly OUTSIDE database transaction
         var room = await GetRoomAsync(dto.RoomId);
 
         if (room is null)
@@ -140,32 +168,56 @@ public class ReservationService : IReservationService
 
         ValidateRoom(room, dto.Adults, dto.Children);
 
-        var hasOverlap = await _reservationRepository
-            .HasOverlappingReservationAsync(
-                dto.RoomId,
-                dto.CheckIn,
-                dto.CheckOut,
-                id);
+        var oldRoomId = reservation.RoomId;
+        var newRoomId = dto.RoomId;
+        var roomsToLock = new[] { oldRoomId, newRoomId }.Distinct().OrderBy(r => r).ToList();
 
-        if (hasOverlap)
-            throw new ConflictException(
-                "The selected room is not available for the requested dates.");
+        await using var transaction = await _reservationRepository.BeginTransactionAsync();
+        try
+        {
+            // Acquire locks in ascending order to prevent deadlocks
+            foreach (var roomId in roomsToLock)
+            {
+                await _reservationRepository.AcquireRoomLockAsync(roomId);
+            }
 
-        reservation.GuestId = dto.GuestId;
-        reservation.RoomId = dto.RoomId;
-        reservation.Adults = dto.Adults;
-        reservation.Children = dto.Children;
-        reservation.CheckIn = dto.CheckIn;
-        reservation.CheckOut = dto.CheckOut;
-        reservation.Nights = dto.CheckOut.DayNumber - dto.CheckIn.DayNumber;
+            var hasOverlap = await _reservationRepository
+                .HasOverlappingReservationAsync(
+                    dto.RoomId,
+                    dto.CheckIn,
+                    dto.CheckOut,
+                    id);
 
-        await _reservationRepository.UpdateAsync(reservation);
+            if (hasOverlap)
+            {
+                throw new ConflictException(
+                    "The selected room is not available for the requested dates.");
+            }
 
-        return MapToResponse(reservation, "Reservation updated successfully.");
+            reservation.GuestId = dto.GuestId;
+            reservation.RoomId = dto.RoomId;
+            reservation.Adults = dto.Adults;
+            reservation.Children = dto.Children;
+            reservation.CheckIn = dto.CheckIn;
+            reservation.CheckOut = dto.CheckOut;
+            reservation.Nights = dto.CheckOut.DayNumber - dto.CheckIn.DayNumber;
+
+            await _reservationRepository.UpdateAsync(reservation);
+            await transaction.CommitAsync();
+
+            return MapToResponse(reservation, "Reservation updated successfully.");
+        }
+        catch
+        {
+            await transaction.RollbackAsync();
+            throw;
+        }
     }
 
     /// <summary>
-    /// Updates only the status field (e.g. Confirmed -> CheckedIn -> CheckedOut or Cancelled).
+    /// Updates the reservation lifecycle status.
+    /// If transitioning from a non-blocking status (Cancelled/CheckedOut) to a blocking status,
+    /// locks the room and re-verifies availability.
     /// </summary>
     public async Task<ReservationResponseDto?> UpdateStatusAsync(
         int id,
@@ -179,8 +231,47 @@ public class ReservationService : IReservationService
         if (!ValidStatuses.Contains(dto.Status))
             throw new BadRequestException("Invalid reservation status.");
 
-        reservation.Status = dto.Status;
+        var wasBlocking = BlockingStatuses.Contains(reservation.Status);
+        var willBeBlocking = BlockingStatuses.Contains(dto.Status);
 
+        // If reactivating a non-blocking booking into a blocking status, acquire lock and verify availability
+        if (!wasBlocking && willBeBlocking)
+        {
+            await using var transaction = await _reservationRepository.BeginTransactionAsync();
+            try
+            {
+                await _reservationRepository.AcquireRoomLockAsync(reservation.RoomId);
+
+                var hasOverlap = await _reservationRepository
+                    .HasOverlappingReservationAsync(
+                        reservation.RoomId,
+                        reservation.CheckIn,
+                        reservation.CheckOut,
+                        id);
+
+                if (hasOverlap)
+                {
+                    throw new ConflictException(
+                        "Cannot reactivate reservation: The room is no longer available for the scheduled dates.");
+                }
+
+                reservation.Status = dto.Status;
+                await _reservationRepository.UpdateAsync(reservation);
+                await transaction.CommitAsync();
+
+                return MapToResponse(
+                    reservation,
+                    "Reservation status updated successfully.");
+            }
+            catch
+            {
+                await transaction.RollbackAsync();
+                throw;
+            }
+        }
+
+        // Standard status update (e.g. Confirmed -> CheckedIn -> CheckedOut or Cancelled)
+        reservation.Status = dto.Status;
         await _reservationRepository.UpdateAsync(reservation);
 
         return MapToResponse(
