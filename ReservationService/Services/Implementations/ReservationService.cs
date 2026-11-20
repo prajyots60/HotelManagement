@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Logging;
 using ReservationService.DTOs.Reservations;
 using ReservationService.Exceptions;
 using ReservationService.Models;
@@ -19,6 +20,7 @@ public class ReservationService : IReservationService
     private readonly IGuestRepository _guestRepository;
     private readonly HttpClient _httpClient;
     private readonly IHttpContextAccessor _httpContextAccessor;
+    private readonly ILogger<ReservationService> _logger;
 
     // HashSet provides O(1) constant-time lookup for valid lifecycle states
     private static readonly HashSet<string> ValidStatuses =
@@ -42,12 +44,14 @@ public class ReservationService : IReservationService
         IReservationRepository reservationRepository,
         IGuestRepository guestRepository,
         HttpClient httpClient,
-        IHttpContextAccessor httpContextAccessor)
+        IHttpContextAccessor httpContextAccessor,
+        ILogger<ReservationService> logger)
     {
         _reservationRepository = reservationRepository;
         _guestRepository = guestRepository;
         _httpClient = httpClient;
         _httpContextAccessor = httpContextAccessor;
+        _logger = logger;
     }
 
     /// <summary>
@@ -96,7 +100,10 @@ public class ReservationService : IReservationService
         var room = await GetRoomAsync(dto.RoomId);
 
         if (room is null)
+        {
+            _logger.LogWarning("Reservation creation rejected: RoomId {RoomId} not found.", dto.RoomId);
             throw new NotFoundException("Room not found.");
+        }
 
         ValidateRoom(room, dto.Adults, dto.Children);
 
@@ -114,6 +121,9 @@ public class ReservationService : IReservationService
 
             if (hasOverlap)
             {
+                _logger.LogWarning(
+                    "Reservation rejected due to room unavailability. RoomId: {RoomId}",
+                    dto.RoomId);
                 throw new ConflictException(
                     "The selected room is not available for the requested dates.");
             }
@@ -133,6 +143,11 @@ public class ReservationService : IReservationService
 
             var created = await _reservationRepository.CreateAsync(reservation);
             await transaction.CommitAsync();
+
+            _logger.LogInformation(
+                "Reservation created successfully. ReservationId: {ReservationId}, RoomId: {RoomId}",
+                created.ReservationId,
+                created.RoomId);
 
             return MapToResponse(created, "Reservation created successfully.");
         }
@@ -154,7 +169,10 @@ public class ReservationService : IReservationService
         var reservation = await _reservationRepository.GetByIdAsync(id);
 
         if (reservation is null)
+        {
+            _logger.LogWarning("Reservation update rejected: ReservationId {ReservationId} not found.", id);
             return null;
+        }
 
         ValidateStayDates(dto.CheckIn, dto.CheckOut);
 
@@ -164,7 +182,10 @@ public class ReservationService : IReservationService
         var room = await GetRoomAsync(dto.RoomId);
 
         if (room is null)
+        {
+            _logger.LogWarning("Reservation update rejected: RoomId {RoomId} not found.", dto.RoomId);
             throw new NotFoundException("Room not found.");
+        }
 
         ValidateRoom(room, dto.Adults, dto.Children);
 
@@ -190,6 +211,10 @@ public class ReservationService : IReservationService
 
             if (hasOverlap)
             {
+                _logger.LogWarning(
+                    "Reservation update rejected due to room unavailability. ReservationId: {ReservationId}, TargetRoomId: {RoomId}",
+                    id,
+                    dto.RoomId);
                 throw new ConflictException(
                     "The selected room is not available for the requested dates.");
             }
@@ -204,6 +229,11 @@ public class ReservationService : IReservationService
 
             await _reservationRepository.UpdateAsync(reservation);
             await transaction.CommitAsync();
+
+            _logger.LogInformation(
+                "Reservation updated successfully. ReservationId: {ReservationId}, RoomId: {RoomId}",
+                reservation.ReservationId,
+                reservation.RoomId);
 
             return MapToResponse(reservation, "Reservation updated successfully.");
         }
@@ -226,10 +256,18 @@ public class ReservationService : IReservationService
         var reservation = await _reservationRepository.GetByIdAsync(id);
 
         if (reservation is null)
+        {
+            _logger.LogWarning("Reservation status update rejected: ReservationId {ReservationId} not found.", id);
             return null;
+        }
 
         if (!ValidStatuses.Contains(dto.Status))
+        {
+            _logger.LogWarning(
+                "Reservation status update rejected due to invalid status value. ReservationId: {ReservationId}",
+                id);
             throw new BadRequestException("Invalid reservation status.");
+        }
 
         var wasBlocking = BlockingStatuses.Contains(reservation.Status);
         var willBeBlocking = BlockingStatuses.Contains(dto.Status);
@@ -251,6 +289,10 @@ public class ReservationService : IReservationService
 
                 if (hasOverlap)
                 {
+                    _logger.LogWarning(
+                        "Reservation reactivation rejected due to room unavailability. ReservationId: {ReservationId}, RoomId: {RoomId}",
+                        id,
+                        reservation.RoomId);
                     throw new ConflictException(
                         "Cannot reactivate reservation: The room is no longer available for the scheduled dates.");
                 }
@@ -258,6 +300,11 @@ public class ReservationService : IReservationService
                 reservation.Status = dto.Status;
                 await _reservationRepository.UpdateAsync(reservation);
                 await transaction.CommitAsync();
+
+                _logger.LogInformation(
+                    "Reservation status changed successfully. ReservationId: {ReservationId}, NewStatus: {Status}",
+                    reservation.ReservationId,
+                    reservation.Status);
 
                 return MapToResponse(
                     reservation,
@@ -273,6 +320,11 @@ public class ReservationService : IReservationService
         // Standard status update (e.g. Confirmed -> CheckedIn -> CheckedOut or Cancelled)
         reservation.Status = dto.Status;
         await _reservationRepository.UpdateAsync(reservation);
+
+        _logger.LogInformation(
+            "Reservation status changed successfully. ReservationId: {ReservationId}, NewStatus: {Status}",
+            reservation.ReservationId,
+            reservation.Status);
 
         return MapToResponse(
             reservation,
@@ -340,7 +392,10 @@ public class ReservationService : IReservationService
         var guest = await _guestRepository.GetByIdAsync(guestId);
 
         if (guest is null)
+        {
+            _logger.LogWarning("Reservation rejected: GuestId {GuestId} not found.", guestId);
             throw new NotFoundException("Guest not found.");
+        }
     }
 
     private static void ValidateStayDates(
@@ -354,13 +409,18 @@ public class ReservationService : IReservationService
         }
     }
 
-    private static void ValidateRoom(
+    private void ValidateRoom(
         HotelRoomResponseDto room,
         int adults,
         int children)
     {
         if (room.Capacity < adults + children)
         {
+            _logger.LogWarning(
+                "Reservation rejected due to room capacity. RoomId: {RoomId}, Capacity: {Capacity}, RequestedGuests: {RequestedGuests}",
+                room.RoomId,
+                room.Capacity,
+                adults + children);
             throw new ConflictException(
                 "The number of guests exceeds the room capacity.");
         }
@@ -370,6 +430,9 @@ public class ReservationService : IReservationService
             "Maintenance",
             StringComparison.OrdinalIgnoreCase))
         {
+            _logger.LogWarning(
+                "Reservation rejected due to room under maintenance. RoomId: {RoomId}",
+                room.RoomId);
             throw new ConflictException(
                 "The selected room is under maintenance.");
         }

@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using ReservationService.DTOs.Guests;
 using ReservationService.Exceptions;
 using ReservationService.Models;
@@ -12,12 +13,15 @@ namespace ReservationService.Services.Implementations;
 /// </summary>
 public class GuestService : IGuestService
 {
-    // Injected repository interface: allows switching out DB implementations or mocking in unit tests.
     private readonly IGuestRepository _guestRepository;
+    private readonly ILogger<GuestService> _logger;
 
-    public GuestService(IGuestRepository guestRepository)
+    public GuestService(
+        IGuestRepository guestRepository,
+        ILogger<GuestService> logger)
     {
         _guestRepository = guestRepository;
+        _logger = logger;
     }
 
     /// <summary>
@@ -53,6 +57,7 @@ public class GuestService : IGuestService
 
         if (existingGuest is not null)
         {
+            _logger.LogWarning("Guest creation rejected due to duplicate member code.");
             throw new ConflictException(
                 "A guest with the provided member code already exists.");
         }
@@ -72,6 +77,10 @@ public class GuestService : IGuestService
         // 3. Persistence via Repository
         var createdGuest = await _guestRepository.CreateAsync(guest);
 
+        _logger.LogInformation(
+            "Guest created successfully. GuestId: {GuestId}",
+            createdGuest.GuestId);
+
         // 4. Mapping Domain Entity -> Response DTO
         return MapToResponseDto(createdGuest);
     }
@@ -88,6 +97,7 @@ public class GuestService : IGuestService
 
         if (guest is null)
         {
+            _logger.LogWarning("Guest update rejected: GuestId {GuestId} not found.", id);
             return null; // Signals 404 to the controller
         }
 
@@ -98,6 +108,9 @@ public class GuestService : IGuestService
 
         if (existingGuest is not null && existingGuest.GuestId != id)
         {
+            _logger.LogWarning(
+                "Guest update rejected due to duplicate member code. GuestId: {GuestId}",
+                id);
             throw new ConflictException(
                 "A guest with the provided member code already exists.");
         }
@@ -114,6 +127,10 @@ public class GuestService : IGuestService
         // 4. Save changes via repository
         await _guestRepository.UpdateAsync(guest);
 
+        _logger.LogInformation(
+            "Guest updated successfully. GuestId: {GuestId}",
+            guest.GuestId);
+
         return MapToResponseDto(guest);
     }
 
@@ -126,10 +143,15 @@ public class GuestService : IGuestService
 
         if (guest is null)
         {
+            _logger.LogWarning("Guest deletion rejected: GuestId {GuestId} not found.", id);
             return false; // Signals 404 to the controller
         }
 
         await _guestRepository.DeleteAsync(guest);
+
+        _logger.LogInformation(
+            "Guest deleted successfully. GuestId: {GuestId}",
+            id);
 
         return true;
     }
