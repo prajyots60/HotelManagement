@@ -1,5 +1,7 @@
+using FluentValidation;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using ReservationService.Authorization;
 using ReservationService.DTOs.Reservations;
 using ReservationService.Services.Interfaces;
 
@@ -9,16 +11,26 @@ namespace ReservationService.Controllers;
 /// Manages hotel reservation lifecycles.
 /// Secured by [Authorize] requiring a valid JWT Bearer token.
 /// </summary>
-[Authorize] // Enforces JWT authentication across all endpoints in this controller
+[Authorize(Policy = ReservationPolicies.ReservationsRead)]
 [ApiController] // Activates automated model state validation and ProblemDetails
 [Route("api/reservations")]
 public class ReservationsController : ControllerBase
 {
     private readonly IReservationService _service;
+    private readonly IValidator<CreateReservationDto> _createValidator;
+    private readonly IValidator<UpdateReservationDto> _updateValidator;
+    private readonly IValidator<UpdateReservationStatusDto> _statusValidator;
 
-    public ReservationsController(IReservationService service)
+    public ReservationsController(
+        IReservationService service,
+        IValidator<CreateReservationDto> createValidator,
+        IValidator<UpdateReservationDto> updateValidator,
+        IValidator<UpdateReservationStatusDto> statusValidator)
     {
         _service = service;
+        _createValidator = createValidator;
+        _updateValidator = updateValidator;
+        _statusValidator = statusValidator;
     }
 
     /// <summary>
@@ -49,90 +61,82 @@ public class ReservationsController : ControllerBase
     /// <summary>
     /// POST: api/reservations
     /// Creates a new reservation after validating guest, room, stay dates, and scheduling conflicts.
-    /// Translates domain exceptions into standard HTTP status codes:
-    /// - KeyNotFoundException -> 404 (Guest or Room does not exist)
-    /// - InvalidOperationException -> 409 (Overlap conflict or capacity exceeded)
-    /// - ArgumentException -> 400 (CheckIn >= CheckOut)
     /// </summary>
+    [Authorize(Policy = ReservationPolicies.ReservationsManage)]
     [HttpPost]
     public async Task<IActionResult> Create([FromBody] CreateReservationDto dto)
     {
-        try
+        var validationResult = await _createValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
         {
-            var reservation = await _service.CreateAsync(dto);
+            foreach (var failure in validationResult.Errors)
+            {
+                ModelState.AddModelError(failure.PropertyName, failure.ErrorMessage);
+            }
+            return ValidationProblem(ModelState);
+        }
 
-            return CreatedAtAction(
-                nameof(GetById),
-                new { id = reservation.ReservationId },
-                reservation);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(new { message = ex.Message });
-        }
-        catch (InvalidOperationException ex)
-        {
-            return Conflict(new { message = ex.Message });
-        }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+        var reservation = await _service.CreateAsync(dto);
+
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = reservation.ReservationId },
+            reservation);
     }
 
     /// <summary>
     /// PUT: api/reservations/{id}
     /// Modifies reservation schedule or guest counts, checking for room availability conflicts.
     /// </summary>
+    [Authorize(Policy = ReservationPolicies.ReservationsManage)]
     [HttpPut("{id:int}")]
     public async Task<IActionResult> Update(
         int id,
         [FromBody] UpdateReservationDto dto)
     {
-        try
+        var validationResult = await _updateValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
         {
-            var reservation = await _service.UpdateAsync(id, dto);
+            foreach (var failure in validationResult.Errors)
+            {
+                ModelState.AddModelError(failure.PropertyName, failure.ErrorMessage);
+            }
+            return ValidationProblem(ModelState);
+        }
 
-            if (reservation is null)
-                return NotFound(new { message = "Reservation not found." });
+        var reservation = await _service.UpdateAsync(id, dto);
 
-            return Ok(reservation);
-        }
-        catch (KeyNotFoundException ex)
-        {
-            return NotFound(new { message = ex.Message });
-        }
-        catch (InvalidOperationException ex)
-        {
-            return Conflict(new { message = ex.Message });
-        }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+        if (reservation is null)
+            return NotFound(new { message = "Reservation not found." });
+
+        return Ok(reservation);
     }
 
     /// <summary>
     /// PUT: api/reservations/{id}/status
     /// Dedicated action for reservation lifecycle transitions (Pending, Confirmed, CheckedIn, CheckedOut, Cancelled).
     /// </summary>
+    [Authorize(Policy = ReservationPolicies.ReservationsManage)]
     [HttpPut("{id:int}/status")]
     public async Task<IActionResult> UpdateStatus(
         int id,
         [FromBody] UpdateReservationStatusDto dto)
     {
-        try
+        var validationResult = await _statusValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
         {
-            var reservation = await _service.UpdateStatusAsync(id, dto);
-
-            if (reservation is null)
-                return NotFound(new { message = "Reservation not found." });
-
-            return Ok(reservation);
+            foreach (var failure in validationResult.Errors)
+            {
+                ModelState.AddModelError(failure.PropertyName, failure.ErrorMessage);
+            }
+            return ValidationProblem(ModelState);
         }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+
+        var reservation = await _service.UpdateStatusAsync(id, dto);
+
+        if (reservation is null)
+            return NotFound(new { message = "Reservation not found." });
+
+        return Ok(reservation);
     }
 }

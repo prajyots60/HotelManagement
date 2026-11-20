@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using ReservationService.Authorization;
 using ReservationService.Services.Interfaces;
 
 namespace ReservationService.Controllers;
@@ -9,7 +10,7 @@ namespace ReservationService.Controllers;
 /// Even though physical room data resides in HotelManagementService,
 /// "Availability" requires checking active reservation schedules in ReservationDB.
 /// </summary>
-[Authorize]
+[Authorize(Policy = ReservationPolicies.RoomAvailabilityRead)]
 [ApiController]
 [Route("api/rooms")]
 public class RoomsController : ControllerBase
@@ -32,18 +33,11 @@ public class RoomsController : ControllerBase
         [FromQuery] DateOnly checkOut,
         [FromQuery] int guests)
     {
-        try
-        {
-            var rooms = await _service.GetAvailableRoomsAsync(
-                checkIn,
-                checkOut,
-                guests);
+        var rooms = await _service.GetAvailableRoomsAsync(
+            checkIn,
+            checkOut,
+            guests);
 
-            return Ok(rooms);
-        }
-        catch (ArgumentException ex)
-        {
-            return BadRequest(new { message = ex.Message });
-        }
+        return Ok(rooms);
     }
 }

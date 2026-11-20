@@ -1,4 +1,5 @@
 using ReservationService.DTOs.Guests;
+using ReservationService.Exceptions;
 using ReservationService.Models;
 using ReservationService.Repositories.Interfaces;
 using ReservationService.Services.Interfaces;
@@ -52,8 +53,8 @@ public class GuestService : IGuestService
 
         if (existingGuest is not null)
         {
-            throw new InvalidOperationException(
-                $"A guest with MemberCode '{dto.MemberCode}' already exists.");
+            throw new ConflictException(
+                "A guest with the provided member code already exists.");
         }
 
         // 2. Mapping DTO -> Domain Entity
@@ -97,8 +98,8 @@ public class GuestService : IGuestService
 
         if (existingGuest is not null && existingGuest.GuestId != id)
         {
-            throw new InvalidOperationException(
-                $"A guest with MemberCode '{dto.MemberCode}' already exists.");
+            throw new ConflictException(
+                "A guest with the provided member code already exists.");
         }
 
         // 3. Mutate the tracked entity's properties

@@ -1,4 +1,7 @@
+using FluentValidation;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using ReservationService.Authorization;
 using ReservationService.DTOs.Guests;
 using ReservationService.Services.Interfaces;
 
@@ -8,16 +11,24 @@ namespace ReservationService.Controllers;
 /// API Controller exposing CRUD endpoints for managing hotel guests.
 /// Inherits from ControllerBase (specialized for Web APIs without Razor View engine overhead).
 /// </summary>
+[Authorize(Policy = ReservationPolicies.GuestsRead)]
 [ApiController] // Enables automatic model validation, ProblemDetails, and parameter binding inferences
 [Route("api/[controller]")] // Route token [controller] resolves dynamically to "guests"
 public class GuestsController : ControllerBase
 {
     private readonly IGuestService _guestService;
+    private readonly IValidator<CreateGuestDto> _createValidator;
+    private readonly IValidator<UpdateGuestDto> _updateValidator;
 
-    // Dependency Injection: ASP.NET Core supplies the scoped IGuestService implementation
-    public GuestsController(IGuestService guestService)
+    // Dependency Injection: ASP.NET Core supplies the scoped IGuestService and validators
+    public GuestsController(
+        IGuestService guestService,
+        IValidator<CreateGuestDto> createValidator,
+        IValidator<UpdateGuestDto> updateValidator)
     {
         _guestService = guestService;
+        _createValidator = createValidator;
+        _updateValidator = updateValidator;
     }
 
     /// <summary>
@@ -55,53 +66,57 @@ public class GuestsController : ControllerBase
     /// Registers a new guest.
     /// [FromBody] binds incoming JSON payload from the request stream to CreateGuestDto.
     /// </summary>
+    [Authorize(Policy = ReservationPolicies.GuestsManage)]
     [HttpPost]
     public async Task<ActionResult<GuestResponseDto>> Create(
         [FromBody] CreateGuestDto dto)
     {
-        try
+        var validationResult = await _createValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
         {
-            var createdGuest = await _guestService.CreateAsync(dto);
+            foreach (var failure in validationResult.Errors)
+            {
+                ModelState.AddModelError(failure.PropertyName, failure.ErrorMessage);
+            }
+            return ValidationProblem(ModelState);
+        }
 
-            // CreatedAtAction emits HTTP 201 Created and sets the 'Location' response header:
-            // Location: http://localhost:7003/api/guests/{id}
-            return CreatedAtAction(
-                nameof(GetById),
-                new { id = createdGuest.GuestId },
-                createdGuest);
-        }
-        catch (InvalidOperationException ex)
-        {
-            // Translates duplicate MemberCode business exception into RFC-standard HTTP 409 Conflict
-            return Conflict(new { message = ex.Message });
-        }
+        var createdGuest = await _guestService.CreateAsync(dto);
+
+        return CreatedAtAction(
+            nameof(GetById),
+            new { id = createdGuest.GuestId },
+            createdGuest);
     }
 
     /// <summary>
     /// PUT: api/guests/5
     /// Updates all fields of an existing guest. Idempotent operation.
     /// </summary>
+    [Authorize(Policy = ReservationPolicies.GuestsManage)]
     [HttpPut("{id:int}")]
     public async Task<ActionResult<GuestResponseDto>> Update(
         int id,
         [FromBody] UpdateGuestDto dto)
     {
-        try
+        var validationResult = await _updateValidator.ValidateAsync(dto);
+        if (!validationResult.IsValid)
         {
-            var updatedGuest = await _guestService.UpdateAsync(id, dto);
-
-            if (updatedGuest is null)
+            foreach (var failure in validationResult.Errors)
             {
-                return NotFound(new { message = $"Guest with ID {id} was not found." });
+                ModelState.AddModelError(failure.PropertyName, failure.ErrorMessage);
             }
+            return ValidationProblem(ModelState);
+        }
 
-            return Ok(updatedGuest); // Emits HTTP 200 OK
-        }
-        catch (InvalidOperationException ex)
+        var updatedGuest = await _guestService.UpdateAsync(id, dto);
+
+        if (updatedGuest is null)
         {
-            // Rejects update if client tries to take another guest's MemberCode
-            return Conflict(new { message = ex.Message });
+            return NotFound(new { message = $"Guest with ID {id} was not found." });
         }
+
+        return Ok(updatedGuest);
     }
 
     /// <summary>
@@ -109,6 +124,7 @@ public class GuestsController : ControllerBase
     /// Removes a guest by ID.
     /// Returns 204 NoContent on success because the resource no longer exists.
     /// </summary>
+    [Authorize(Policy = ReservationPolicies.GuestsDelete)]
     [HttpDelete("{id:int}")]
     public async Task<IActionResult> Delete(int id)
     {

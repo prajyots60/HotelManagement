@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using Microsoft.AspNetCore.Http;
 using ReservationService.DTOs.Reservations;
+using ReservationService.Exceptions;
 using ReservationService.Models;
 using ReservationService.Repositories.Interfaces;
 using ReservationService.Services.Interfaces;
@@ -84,7 +85,7 @@ public class ReservationService : IReservationService
         var room = await GetRoomAsync(dto.RoomId);
 
         if (room is null)
-            throw new KeyNotFoundException("Room not found.");
+            throw new NotFoundException("Room not found.");
 
         ValidateRoom(room, dto.Adults, dto.Children);
 
@@ -95,7 +96,7 @@ public class ReservationService : IReservationService
                 dto.CheckOut);
 
         if (hasOverlap)
-            throw new InvalidOperationException(
+            throw new ConflictException(
                 "The selected room is not available for the requested dates.");
 
         var reservation = new Reservation
@@ -135,7 +136,7 @@ public class ReservationService : IReservationService
         var room = await GetRoomAsync(dto.RoomId);
 
         if (room is null)
-            throw new KeyNotFoundException("Room not found.");
+            throw new NotFoundException("Room not found.");
 
         ValidateRoom(room, dto.Adults, dto.Children);
 
@@ -147,7 +148,7 @@ public class ReservationService : IReservationService
                 id);
 
         if (hasOverlap)
-            throw new InvalidOperationException(
+            throw new ConflictException(
                 "The selected room is not available for the requested dates.");
 
         reservation.GuestId = dto.GuestId;
@@ -176,7 +177,7 @@ public class ReservationService : IReservationService
             return null;
 
         if (!ValidStatuses.Contains(dto.Status))
-            throw new ArgumentException("Invalid reservation status.");
+            throw new BadRequestException("Invalid reservation status.");
 
         reservation.Status = dto.Status;
 
@@ -202,7 +203,7 @@ public class ReservationService : IReservationService
         ValidateStayDates(checkIn, checkOut);
 
         if (guests <= 0)
-            throw new ArgumentException("Guest count must be greater than zero.");
+            throw new BadRequestException("Guest count must be greater than zero.");
 
         var rooms = await GetAllRoomsAsync();
 
@@ -248,7 +249,7 @@ public class ReservationService : IReservationService
         var guest = await _guestRepository.GetByIdAsync(guestId);
 
         if (guest is null)
-            throw new KeyNotFoundException("Guest not found.");
+            throw new NotFoundException("Guest not found.");
     }
 
     private static void ValidateStayDates(
@@ -257,7 +258,7 @@ public class ReservationService : IReservationService
     {
         if (checkOut <= checkIn)
         {
-            throw new ArgumentException(
+            throw new BadRequestException(
                 "Check-out date must be later than check-in date.");
         }
     }
@@ -269,7 +270,7 @@ public class ReservationService : IReservationService
     {
         if (room.Capacity < adults + children)
         {
-            throw new InvalidOperationException(
+            throw new ConflictException(
                 "The number of guests exceeds the room capacity.");
         }
 
@@ -278,7 +279,7 @@ public class ReservationService : IReservationService
             "Maintenance",
             StringComparison.OrdinalIgnoreCase))
         {
-            throw new InvalidOperationException(
+            throw new ConflictException(
                 "The selected room is under maintenance.");
         }
     }
@@ -288,23 +289,41 @@ public class ReservationService : IReservationService
     /// </summary>
     private async Task<HotelRoomResponseDto?> GetRoomAsync(int roomId)
     {
-        using var request = CreateHotelRequest($"api/rooms/{roomId}");
-
-        using var response = await _httpClient.SendAsync(request);
-
-        if (response.StatusCode == HttpStatusCode.NotFound)
-            return null;
-
-        if (response.StatusCode is HttpStatusCode.Unauthorized
-            or HttpStatusCode.Forbidden)
+        try
         {
-            throw new UnauthorizedAccessException(
-                "HotelManagementService rejected the authentication token.");
+            using var request = CreateHotelRequest($"api/rooms/{roomId}");
+            using var response = await _httpClient.SendAsync(request);
+
+            if (response.StatusCode == HttpStatusCode.NotFound)
+                return null;
+
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                throw new DownstreamServiceException(
+                    "HotelManagementService rejected the authentication token.",
+                    response.StatusCode);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new DownstreamServiceException(
+                    $"HotelManagementService returned error status code: {(int)response.StatusCode}",
+                    response.StatusCode);
+            }
+
+            return await response.Content.ReadFromJsonAsync<HotelRoomResponseDto>();
         }
-
-        response.EnsureSuccessStatusCode();
-
-        return await response.Content.ReadFromJsonAsync<HotelRoomResponseDto>();
+        catch (DownstreamServiceException)
+        {
+            throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new DownstreamServiceException(
+                "Unable to connect to HotelManagementService.",
+                ex,
+                ex.StatusCode);
+        }
     }
 
     /// <summary>
@@ -312,22 +331,40 @@ public class ReservationService : IReservationService
     /// </summary>
     private async Task<List<HotelRoomResponseDto>> GetAllRoomsAsync()
     {
-        using var request = CreateHotelRequest("api/rooms");
-
-        using var response = await _httpClient.SendAsync(request);
-
-        if (response.StatusCode is HttpStatusCode.Unauthorized
-            or HttpStatusCode.Forbidden)
+        try
         {
-            throw new UnauthorizedAccessException(
-                "HotelManagementService rejected the authentication token.");
+            using var request = CreateHotelRequest("api/rooms");
+            using var response = await _httpClient.SendAsync(request);
+
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                throw new DownstreamServiceException(
+                    "HotelManagementService rejected the authentication token.",
+                    response.StatusCode);
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                throw new DownstreamServiceException(
+                    $"HotelManagementService returned error status code: {(int)response.StatusCode}",
+                    response.StatusCode);
+            }
+
+            return await response.Content
+                .ReadFromJsonAsync<List<HotelRoomResponseDto>>()
+                ?? [];
         }
-
-        response.EnsureSuccessStatusCode();
-
-        return await response.Content
-            .ReadFromJsonAsync<List<HotelRoomResponseDto>>()
-            ?? [];
+        catch (DownstreamServiceException)
+        {
+            throw;
+        }
+        catch (HttpRequestException ex)
+        {
+            throw new DownstreamServiceException(
+                "Unable to connect to HotelManagementService.",
+                ex,
+                ex.StatusCode);
+        }
     }
 
     /// <summary>
